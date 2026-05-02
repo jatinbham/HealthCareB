@@ -1,268 +1,166 @@
-import express from "express"
-import mongoose from "mongoose"
-import cors from "cors"
-import dotenv from "dotenv"
-import bcrypt from "bcryptjs"
-import jwt from "jsonwebtoken"
-import Groq from "groq-sdk"
+import express from "express";
+import mongoose from "mongoose";
+import cors from "cors";
+import dotenv from "dotenv";
+import bcrypt from "bcryptjs";
+import jwt from "jsonwebtoken";
+import Groq from "groq-sdk";
+import rateLimit from "express-rate-limit";
 
-import User from "./models/User.js"
-import HealthReport from "./models/HealthReport.js"
+// Middleware
+import authMiddleware from "./middleware/authMiddleware.js";
+import errorHandler from "./middleware/errorHandler.js";
 
-dotenv.config()
+// Models
+import User from "./models/User.js";
+import HealthProfile from "./models/HealthProfile.js";
+import HealthReport from "./models/HealthReport.js";
 
-const app = express()
+dotenv.config();
 
-/* ---------------- MIDDLEWARE ---------------- */
+const app = express();
 
-app.use(cors({ origin: "*" }))
-app.use(express.json())
+/* ================== MIDDLEWARE ================== */
+app.use(cors({
+    origin: ["http://localhost:5173", "https://your-frontend-url.vercel.app"], // ← apna frontend URL add kar dena
+    credentials: true
+}));
 
-/* ---------------- DB CONNECT ---------------- */
+app.use(express.json());
 
+// Rate Limiter for AI calls
+const aiLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 8,
+    message: { success: false, message: "Too many AI requests, please try again later." }
+});
+
+/* ================== DATABASE ================== */
 mongoose.connect(process.env.MONGO_URL)
-.then(() => console.log("MongoDB Connected 🚀"))
-.catch(err => console.log("DB Error:", err))
+    .then(() => console.log("✅ MongoDB Connected Successfully"))
+    .catch(err => console.error("❌ MongoDB Connection Error:", err));
 
-/* ---------------- GROQ SETUP ---------------- */
-
+/* ================== GROQ AI ================== */
 const groq = new Groq({
     apiKey: process.env.GROQ_API_KEY
-})
+});
 
-/* ---------------- AUTH MIDDLEWARE ---------------- */
+/* ================== ROUTES ================== */
 
-const authMiddleware = (req, res, next) => {
-
-    try {
-
-        const token = req.headers.authorization?.split(" ")[1]
-
-        if (!token) {
-            return res.status(401).json({ message: "No token provided" })
-        }
-
-        const verified = jwt.verify(token, process.env.JWT_SECRET)
-        req.user = verified
-
-        next()
-
-    } catch (error) {
-        return res.status(401).json({ message: "Invalid token" })
-    }
-}
-
-/* ---------------- HOME ---------------- */
-
+// Home Route
 app.get("/", (req, res) => {
-    res.send("Backend Running 🚀")
-})
+    res.send("VitalAI Backend is Running 🚀");
+});
 
-/* ---------------- SIGNUP ---------------- */
-
+// SIGNUP
 app.post("/signup", async (req, res) => {
-
     try {
-
-        const { name, email, password } = req.body
+        const { name, email, password } = req.body;
 
         if (!name || !email || !password) {
-            return res.status(400).json({ message: "All fields required" })
+            return res.status(400).json({ success: false, message: "All fields are required" });
         }
 
-        const existing = await User.findOne({ email })
-
-        if (existing) {
-            return res.status(400).json({ message: "User already exists" })
+        if (await User.findOne({ email })) {
+            return res.status(400).json({ success: false, message: "User already exists" });
         }
 
-        const hashedPassword = await bcrypt.hash(password, 10)
+        const hashedPassword = await bcrypt.hash(password, 10);
 
-        await User.create({
-            name,
-            email,
-            password: hashedPassword
-        })
+        await User.create({ name, email, password: hashedPassword });
 
-        res.json({ message: "User created successfully" })
-
+        res.status(201).json({ success: true, message: "Account created successfully" });
     } catch (error) {
-        res.status(500).json({ error: error.message })
+        res.status(500).json({ success: false, message: error.message });
     }
-})
+});
 
-/* ---------------- LOGIN ---------------- */
-
+// LOGIN
 app.post("/login", async (req, res) => {
-
     try {
+        const { email, password } = req.body;
+        const user = await User.findOne({ email });
 
-        const { email, password } = req.body
-
-        const user = await User.findOne({ email })
-
-        if (!user) {
-            return res.status(400).json({ message: "User not found" })
+        if (!user || !(await bcrypt.compare(password, user.password))) {
+            return res.status(400).json({ success: false, message: "Invalid email or password" });
         }
 
-        const match = await bcrypt.compare(password, user.password)
+        const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: "7d" });
 
-        if (!match) {
-            return res.status(400).json({ message: "Invalid password" })
-        }
-
-        const token = jwt.sign(
-            { id: user._id },
-            process.env.JWT_SECRET,
-            { expiresIn: "7d" }
-        )
-
-        const safeUser = await User.findById(user._id).select("-password")
+        const safeUser = await User.findById(user._id).select("-password");
 
         res.json({
-            message: "Login success",
+            success: true,
+            message: "Login successful",
             token,
             user: safeUser
-        })
-
+        });
     } catch (error) {
-        res.status(500).json({ error: error.message })
+        res.status(500).json({ success: false, message: "Server error" });
     }
-})
+});
 
-/* ---------------- DASHBOARD ---------------- */
-
-app.get("/dashboard", authMiddleware, async (req, res) => {
-
-    const user = await User.findById(req.user.id).select("-password")
-
-    res.json({
-        message: "Welcome dashboard 🚀",
-        user
-    })
-})
-
-
-
-
-/* ---------------- AI HEALTH ---------------- */
-
-app.post("/ai-health", authMiddleware, async (req, res) => {
-
+// AI HEALTH ANALYSIS
+app.post("/ai-health", authMiddleware, aiLimiter, async (req, res) => {
     try {
+        const { symptoms } = req.body;
+        if (!symptoms) return res.status(400).json({ success: false, message: "Symptoms are required" });
 
-        const { symptoms } = req.body
+        const chatCompletion = await groq.chat.completions.create({
+            model: "llama-3.1-8b-instant",
+            messages: [{
+                role: "user",
+                content: `You are a helpful medical AI assistant. Analyze these symptoms: ${symptoms}. Give possible risks, suggestions, and when to see a doctor. Keep it short and practical.`
+            }]
+        });
 
-        if (!symptoms) {
-            return res.status(400).json({ error: "Symptoms required" })
-        }
+        const aiReply = chatCompletion.choices[0].message.content;
 
-        const user = await User.findById(req.user.id)
-
-        if (!user) {
-            return res.status(404).json({ error: "User not found" })
-        }
-
-        let aiReply = ""
-
-        try {
-
-            const chat = await groq.chat.completions.create({
-                model: "llama-3.1-8b-instant",
-                messages: [
-                    {
-                        role: "user",
-                        content: `
-Act like a senior medical AI assistant.
-
-User: ${user.name}
-Symptoms: ${symptoms}
-
-Give:
-- Possible Disease
-- Risk Level (0-100)
-- Stress Level
-- Suggestions
-- When to see doctor
-Keep response short and simple.
-                        `
-                    }
-                ]
-            })
-
-            aiReply = chat.choices[0].message.content
-
-        } catch (aiError) {
-            console.log("AI ERROR:", aiError)
-            return res.status(500).json({ error: "AI service failed" })
-        }
-
-        const saved = await HealthReport.create({
+        const report = await HealthReport.create({
             userId: req.user.id,
             symptoms,
             aiResponse: aiReply
-        })
+        });
 
-        res.json({
-            reply: aiReply,
-            reportId: saved._id
-        })
-
+        res.json({ success: true, reply: aiReply, reportId: report._id });
     } catch (error) {
-        res.status(500).json({ error: error.message })
+        console.error(error);
+        res.status(500).json({ success: false, message: "AI service error" });
     }
-})
+});
 
-/* ---------------- HEALTH HISTORY ---------------- */
-
-app.get("/health-history", authMiddleware, async (req, res) => {
-
-    try {
-
-        const reports = await HealthReport.find({
-            userId: req.user.id
-        })
-        .sort({ createdAt: -1 })
-        .limit(20)
-
-        res.json({
-            total: reports.length,
-            reports
-        })
-
-    } catch (error) {
-        res.status(500).json({ error: error.message })
-    }
-})
-
-
+// SAVE / UPDATE HEALTH PROFILE
 app.post("/health-profile", authMiddleware, async (req, res) => {
     try {
-        const existing = await HealthProfile.findOne({
-            userId: req.user.id
-        })
-
-        if (existing) {
-            await HealthProfile.updateOne(
-                { userId: req.user.id },
-                { $set: req.body }
-            )
-        } else {
-            await HealthProfile.create({
-                userId: req.user.id,
-                ...req.body
-            })
-        }
-
-        res.json({ message: "Profile saved" })
-
+        await HealthProfile.findOneAndUpdate(
+            { userId: req.user.id },
+            { ...req.body, userId: req.user.id },
+            { upsert: true, new: true }
+        );
+        res.json({ success: true, message: "Health profile saved" });
     } catch (error) {
-        res.status(500).json({ error: error.message })
+        res.status(500).json({ success: false, message: error.message });
     }
-})
+});
 
-/* ---------------- SERVER START ---------------- */
+// GET HEALTH HISTORY
+app.get("/health-history", authMiddleware, async (req, res) => {
+    try {
+        const reports = await HealthReport.find({ userId: req.user.id })
+            .sort({ createdAt: -1 })
+            .limit(15);
 
-app.listen(5000, () => {
-    console.log("Server running on port 5000 🚀")
-})
+        res.json({ success: true, reports });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+/* ================== ERROR HANDLER ================== */
+app.use(errorHandler);
+
+/* ================== SERVER ================== */
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => {
+    console.log(`🚀 VitalAI Server running on http://localhost:${PORT}`);
+});

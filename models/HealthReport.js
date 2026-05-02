@@ -7,6 +7,7 @@ const healthReportSchema = new mongoose.Schema({
         ref: "User",
         required: true
     },
+    
 
     symptoms: String,
 

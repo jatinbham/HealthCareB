@@ -142,6 +142,9 @@ app.get("/dashboard", authMiddleware, async (req, res) => {
     })
 })
 
+
+
+
 /* ---------------- AI HEALTH ---------------- */
 
 app.post("/ai-health", authMiddleware, async (req, res) => {
@@ -234,20 +237,18 @@ app.get("/health-history", authMiddleware, async (req, res) => {
 
 
 app.post("/health-profile", authMiddleware, async (req, res) => {
-
     try {
-
-        const existing = await HealthReport.findOne({
+        const existing = await HealthProfile.findOne({
             userId: req.user.id
         })
 
         if (existing) {
-            await HealthReport.updateOne(
+            await HealthProfile.updateOne(
                 { userId: req.user.id },
                 { $set: req.body }
             )
         } else {
-            await HealthReport.create({
+            await HealthProfile.create({
                 userId: req.user.id,
                 ...req.body
             })
@@ -258,7 +259,6 @@ app.post("/health-profile", authMiddleware, async (req, res) => {
     } catch (error) {
         res.status(500).json({ error: error.message })
     }
-
 })
 
 /* ---------------- SERVER START ---------------- */

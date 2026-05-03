@@ -15,6 +15,7 @@ import errorHandler from "./middleware/errorHandler.js";
 import User from "./models/User.js";
 import HealthProfile from "./models/HealthProfile.js";
 import HealthReport from "./models/HealthReport.js";
+import Leaderboard from "./models/Leaderboard.js";
 
 dotenv.config();
 
@@ -22,16 +23,25 @@ const app = express();
 
 /* ================== MIDDLEWARE ================== */
 app.use(cors({
-    origin: ["http://localhost:5173", "https://your-frontend-url.vercel.app"], // ← apna frontend URL add kar dena
-    credentials: true
+    // Isme humne aapka exact Vercel URL add kar diya hai
+    origin: [
+        "http://localhost:5173", 
+        "https://health-care-icgi.vercel.app"
+    ],
+    credentials: true,
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"]
 }));
+
+// Pre-flight requests handling
+app.options("*", cors());
 
 app.use(express.json());
 
 // Rate Limiter for AI calls
 const aiLimiter = rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 8,
+    max: 15, // Limit thoda badha diya hai testing ke liye
     message: { success: false, message: "Too many AI requests, please try again later." }
 });
 
@@ -56,19 +66,14 @@ app.get("/", (req, res) => {
 app.post("/signup", async (req, res) => {
     try {
         const { name, email, password } = req.body;
-
         if (!name || !email || !password) {
             return res.status(400).json({ success: false, message: "All fields are required" });
         }
-
         if (await User.findOne({ email })) {
             return res.status(400).json({ success: false, message: "User already exists" });
         }
-
         const hashedPassword = await bcrypt.hash(password, 10);
-
         await User.create({ name, email, password: hashedPassword });
-
         res.status(201).json({ success: true, message: "Account created successfully" });
     } catch (error) {
         res.status(500).json({ success: false, message: error.message });
@@ -80,15 +85,11 @@ app.post("/login", async (req, res) => {
     try {
         const { email, password } = req.body;
         const user = await User.findOne({ email });
-
         if (!user || !(await bcrypt.compare(password, user.password))) {
             return res.status(400).json({ success: false, message: "Invalid email or password" });
         }
-
         const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: "7d" });
-
         const safeUser = await User.findById(user._id).select("-password");
-
         res.json({
             success: true,
             message: "Login successful",
@@ -124,7 +125,7 @@ app.post("/ai-health", authMiddleware, aiLimiter, async (req, res) => {
 
         res.json({ success: true, reply: aiReply, reportId: report._id });
     } catch (error) {
-        console.error(error);
+        console.error("AI Route Error:", error);
         res.status(500).json({ success: false, message: "AI service error" });
     }
 });
@@ -132,18 +133,18 @@ app.post("/ai-health", authMiddleware, aiLimiter, async (req, res) => {
 // SAVE / UPDATE HEALTH PROFILE
 app.post("/health-profile", authMiddleware, async (req, res) => {
     try {
-        await HealthProfile.findOneAndUpdate(
+        const profile = await HealthProfile.findOneAndUpdate(
             { userId: req.user.id },
             { ...req.body, userId: req.user.id },
             { upsert: true, new: true }
         );
-        res.json({ success: true, message: "Health profile saved" });
+        res.json({ success: true, message: "Health profile saved", profile });
     } catch (error) {
         res.status(500).json({ success: false, message: error.message });
     }
 });
 
-// GET HEALTH HISTORY
+// GET HEALTH HISTORY (Timeline ke liye)
 app.get("/health-history", authMiddleware, async (req, res) => {
     try {
         const reports = await HealthReport.find({ userId: req.user.id })
@@ -156,11 +157,55 @@ app.get("/health-history", authMiddleware, async (req, res) => {
     }
 });
 
+/* ================== LEADERBOARD SYSTEM ================== */
+
+// 1. SAVE OR UPDATE SCORE (The "Neural Link" logic)
+app.post("/save-reflex-score", async (req, res) => {
+    try {
+        const { alias, score, aqi, location } = req.body;
+
+        // Logic: Agar alias exist karta hai, toh sirf tab update karo agar naya score KAM (fast) hai
+        const existingEntry = await Leaderboard.findOne({ alias });
+
+        if (existingEntry) {
+            if (score < existingEntry.score) {
+                existingEntry.score = score;
+                existingEntry.aqi = aqi;
+                existingEntry.location = location;
+                await existingEntry.save();
+                return res.json({ success: true, message: "Rank Improved!", updated: true });
+            } else {
+                return res.json({ success: true, message: "Keep practicing! Previous score was better.", updated: false });
+            }
+        }
+
+        // Agar naya alias hai, toh create kar do
+        const newEntry = await Leaderboard.create({ alias, score, aqi, location });
+        res.status(201).json({ success: true, message: "Alias Registered!", entry: newEntry });
+        
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+// 2. GET TOP 10 (Leaderboard Data)
+app.get("/leaderboard", async (req, res) => {
+    try {
+        // Score ascending order mein (Fastest first)
+        const topScores = await Leaderboard.find()
+            .sort({ score: 1 }) 
+            .limit(10);
+        res.json({ success: true, scores: topScores });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
 /* ================== ERROR HANDLER ================== */
 app.use(errorHandler);
 
 /* ================== SERVER ================== */
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
-    console.log(`🚀 VitalAI Server running on http://localhost:${PORT}`);
+    console.log(`🚀 VitalAI Server running on port ${PORT}`);
 });
